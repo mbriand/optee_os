@@ -90,11 +90,101 @@ static void main_fiq(void)
 #if defined(PLATFORM_FLAVOR_mx6qsabrelite) || \
 	defined(PLATFORM_FLAVOR_mx6qsabresd) || \
 	defined(PLATFORM_FLAVOR_mx6dlsabresd)
+
+static inline int log2_(unsigned int val)
+{
+	unsigned int r = 0;
+
+	while (val >>= 1)
+		r++;
+
+	return r;
+}
+
+static int set_tzasc_config(void)
+{
+	uint32_t ram_mode;
+	uint32_t tzasc_enabled;
+
+	tzasc_enabled = read32(IOMUXC_BASE + IOMUXC_GPR9)
+		& IOMUXC_GPR9_TZASC_MASK;
+	if (!tzasc_enabled) {
+		IMSG("TZASC is not enabled, please flash corresponding fuse.");
+		/* TZASC can be enabled by flashing TZASC_ENABLE using u-boot
+		 * command fuse prog 0 6 10000000
+		 */
+		return 1;
+	}
+
+	ram_mode = read32(SRC_BASE + SRC_SBMR1) & SRC_SBMR1_DDR_MASK;
+	if (ram_mode == SRC_SBMR1_DDR_SINGLE) {
+		const uint32_t ram_end = 0x50000000;
+		uint32_t start;
+		uint32_t size;
+
+		/* On access violation, issue a DECERR but no interrupt */
+		write32(TZASC_ACT_LOW_DECERR, TZASC1_BASE + TZASC_ACT);
+
+		/* Region 0 covers all RAM and is accessible by anyone */
+		write32(TZASC_REGATTR_ALLOW_ALL,
+				TZASC1_BASE + TZASC_REGATTR(0));
+
+		/* Region 1 covers TEE RAM and is accessible only by the secure
+		 * world. This region partly overlaps region 0 and overrides
+		 * access rights set previously on this zone.
+		 */
+#ifdef CFG_WITH_PAGER
+		start = TZSRAM_BASE;
+#else
+		start = CFG_DDR_TEETZ_RESERVED_START;
+#endif
+		size = ram_end - start;
+
+		if ((size & (size - 1)) != 0) {
+			IMSG("TEE reserved RAM must be a power of 2.");
+			return 1;
+		}
+
+		write32(start, TZASC1_BASE + TZASC_REGLOW(1));
+		write32(0, TZASC1_BASE + TZASC_REGHIGH(1));
+		write32(TZASC_REGATTR_ALLOW_SECURE
+				| TZASC_REGATTR_SIZE(log2_(size))
+				| TZASC_REGATTR_EN,
+				TZASC1_BASE + TZASC_REGATTR(1));
+
+		/* Region 2 covers TEE shared memory and is accessible by both
+		 * worlds.  This region partly overlaps region 1 and overrides
+		 * access rights set previously on this zone.
+		 */
+		start = CFG_SHMEM_START;
+		size = ram_end - start;
+
+		if ((size & (size - 1)) != 0) {
+			IMSG("TEE shared RAM must be a power of 2.");
+			return 1;
+		}
+
+		write32(start, TZASC1_BASE + TZASC_REGLOW(2));
+		write32(0, TZASC1_BASE + TZASC_REGHIGH(2));
+		write32(TZASC_REGATTR_ALLOW_ALL
+				| TZASC_REGATTR_SIZE(log2_(size))
+				| TZASC_REGATTR_EN,
+				TZASC1_BASE + TZASC_REGATTR(2));
+	} else {
+		IMSG("Unsupported DDR mode, skipping TZASC configuration.");
+		return 1;
+	}
+
+	return 0;
+}
+
 void plat_cpu_reset_late(void)
 {
 	uintptr_t addr;
 
 	if (!get_core_pos()) {
+		int ret;
+
 		/* primary core */
 #if defined(CFG_BOOT_SYNC_CPU)
 		/* set secondary entry address and release core */
@@ -122,11 +212,18 @@ void plat_cpu_reset_late(void)
 			 addr += 4)
 			write32(CSU_ACCESS_ALL, addr);
 
+		/* Lock TZASC access from Non-Secure world */
+		write32(CSU_ACCESS_SECURE, CSU_BASE + CSU_CSL16);
+
 		/* lock the settings */
 		for (addr = CSU_BASE + CSU_CSL_START;
 			 addr != CSU_BASE + CSU_CSL_END;
 			 addr += 4)
 			write32(read32(addr) | CSU_SETTING_LOCK, addr);
+
+		ret = set_tzasc_config();
+		if (ret != 0)
+			EMSG("TZASC not configured, TEE memory is not secure.");
 	}
 }
 #endif
