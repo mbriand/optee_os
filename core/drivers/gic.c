@@ -382,7 +382,7 @@ void gic_it_handle(struct gic_data *gd)
 
 	if (id == GIC_SPURIOUS_ID)
 		DMSG("ignoring spurious interrupt");
-	else
+	else if (id < gd->max_it)
 		itr_handle(id);
 
 	gic_write_eoir(gd, iar);
