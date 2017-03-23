@@ -45,6 +45,7 @@ arm32-platform-cpuarch		:= cortex-a9
 $(call force,CFG_PL310,y)
 $(call force,CFG_PL310_LOCKED,y)
 $(call force,CFG_SECURE_TIME_SOURCE_REE,y)
+$(call force,CFG_TZC380,y)
 
 CFG_BOOT_SYNC_CPU ?= y
 CFG_BOOT_SECONDARY_REQUEST ?= y

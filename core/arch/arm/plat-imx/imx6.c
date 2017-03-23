@@ -28,9 +28,11 @@
  */
 
 #include <drivers/gic.h>
+#include <drivers/tzc380.h>
 #include <io.h>
 #include <kernel/generic_boot.h>
 #include <kernel/misc.h>
+#include <kernel/panic.h>
 #include <kernel/tz_ssvce_pl310.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
@@ -39,6 +41,58 @@
 register_phys_mem(MEM_AREA_IO_SEC, PL310_BASE, CORE_MMU_DEVICE_SIZE);
 register_phys_mem(MEM_AREA_IO_SEC, SRC_BASE, CORE_MMU_DEVICE_SIZE);
 
+
+#if defined(CFG_TZC380)
+static void set_tzasc_config(void)
+{
+	uint32_t ram_mode;
+	uint32_t tzasc_enabled;
+	int ret;
+
+	tzasc_enabled = read32(IOMUXC_BASE + IOMUXC_GPR9)
+		& IOMUXC_GPR9_TZASC_MASK;
+	if (!tzasc_enabled) {
+		IMSG("TZASC is not enabled, please flash corresponding fuse.");
+		/* TZASC can be enabled by flashing TZASC_ENABLE using u-boot
+		 * command "fuse prog 0 6 10000000"
+		 */
+		return;
+	}
+
+	ram_mode = read32(SRC_BASE + SRC_SBMR1) & SRC_SBMR1_DDR_MASK;
+	if (ram_mode != SRC_SBMR1_DDR_SINGLE) {
+		IMSG("Unsupported DDR mode, skipping TZASC configuration.");
+		return;
+	}
+
+	ret = tzc380_init(TZASC1_BASE);
+	if (ret != TZC380_OK)
+		panic("TZASC initialization failed !");
+
+	/* Region 0 covers all RAM and is accessible by anyone. */
+	ret = tzc380_set_default_region(TZC380_REGATTR_ALLOW_ALL);
+	if (ret != TZC380_OK)
+		panic("TZASC Region 0 setting failed !");
+
+	/* Region 1 covers TEE RAM and is accessible only by the secure
+	 * world. This region partly overlaps region 0 and overrides
+	 * access rights set previously on this zone.
+	 */
+	ret = tzc380_add_region(TZDRAM_BASE, TZDRAM_SIZE + CFG_SHMEM_SIZE,
+				TZC380_REGATTR_ALLOW_SECURE, 0);
+	if (ret != TZC380_OK)
+		panic("TZASC Region 1 setting failed !");
+
+	/* Region 2 covers TEE shared memory and is accessible by both
+	 * worlds.  This region partly overlaps region 1 and overrides
+	 * access rights set previously on this zone.
+	 */
+	ret = tzc380_add_region(CFG_SHMEM_START, CFG_SHMEM_SIZE,
+				TZC380_REGATTR_ALLOW_ALL, 0);
+	if (ret != TZC380_OK)
+		panic("TZASC Region 2 setting failed !");
+}
+#endif
 
 void plat_cpu_reset_late(void)
 {
@@ -72,11 +126,20 @@ void plat_cpu_reset_late(void)
 			 addr += 4)
 			write32(CSU_ACCESS_ALL, addr);
 
+#if defined(CFG_TZC380)
+		/* Lock TZASC access from Non-Secure world */
+		write32(CSU_ACCESS_SECURE, CSU_BASE + CSU_CSL16);
+#endif
+
 		/* lock the settings */
 		for (addr = CSU_BASE + CSU_CSL_START;
 			 addr != CSU_BASE + CSU_CSL_END;
 			 addr += 4)
 			write32(read32(addr) | CSU_SETTING_LOCK, addr);
+
+#if defined(CFG_TZC380)
+		set_tzasc_config();
+#endif
 	}
 }
 
